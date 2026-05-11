@@ -17,6 +17,8 @@ set -euo pipefail
 #   apptainer build ./container/image.sif ./container/setup_env.def
 # ---------------------------------------------------------------------------
 
+module load apptainer/1.3.5
+
 CONTAINER_IMG="${CONTAINER_IMG:-./container/image.sif}"
 if [[ ! -f "$CONTAINER_IMG" ]]; then
     echo "ERROR: container image not found at '$CONTAINER_IMG'." >&2
