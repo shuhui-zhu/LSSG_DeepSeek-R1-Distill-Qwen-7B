@@ -1,1 +1,5 @@
 container/image.sif
+logs/
+ckpts/sbert/
+ckpts/sentiment/
+DeepSeek-R1-Distill-Qwen-7B/
