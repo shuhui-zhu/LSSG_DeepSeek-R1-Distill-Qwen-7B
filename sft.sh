@@ -2,22 +2,14 @@
 #SBATCH --job-name=lssg-sft
 #SBATCH --gres=gpu:h100:2
 #SBATCH --cpus-per-task=24
-#SBATCH --mem=128G
+#SBATCH --mem=256G
 #SBATCH --time=1-23:59:59
 #SBATCH --output=logs/%x-%j.out
 #SBATCH --error=logs/%x-%j.err
 
 set -euo pipefail
 
-# ---------------------------------------------------------------------------
-# Run training inside the Apptainer container built from
-# container/setup_env.def (CUDA 11.8 + PyTorch 2.7.1 + DeepSpeed 0.18.6).
-#
-# Build the image once with:
-#   apptainer build ./container/image.sif ./container/setup_env.def
-# ---------------------------------------------------------------------------
-
-module load apptainer/1.3.5
+module load apptainer
 
 CONTAINER_IMG="${CONTAINER_IMG:-./container/image.sif}"
 if [[ ! -f "$CONTAINER_IMG" ]]; then
