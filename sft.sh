@@ -1,8 +1,8 @@
 #!/bin/bash
 #SBATCH --job-name=lssg-sft
-#SBATCH --gres=gpu:h100:2
-#SBATCH --cpus-per-task=24
-#SBATCH --mem=256G
+#SBATCH --gres=gpu:h100:4
+#SBATCH --cpus-per-task=48
+#SBATCH --mem=512G
 #SBATCH --time=1-23:59:59
 #SBATCH --output=logs/%x-%j.out
 #SBATCH --error=logs/%x-%j.err
@@ -46,7 +46,7 @@ apptainer exec --nv \
     "${APPTAINER_BINDS[@]}" \
     "${APPTAINER_ENV[@]}" \
     "$CONTAINER_IMG" \
-    torchrun --nproc_per_node=2 --master_port=6001 train.py \
+    torchrun --nproc_per_node=4 --master_port=6001 train.py \
         --output_dir "./ckpts/imng-DeepSeek-R1-Distill-Qwen-7B" \
         --model_name_or_path $MODEL \
         --ref_model_name_or_path $MODEL \
