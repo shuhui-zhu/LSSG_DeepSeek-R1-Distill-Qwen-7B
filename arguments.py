@@ -73,6 +73,16 @@ class CustomTrainingArguments(TrainingArguments):
         default="", metadata={"help": "the path to load reference model."}
     )
 
+    seller_model_name_or_path: str = field(
+        default="",
+        metadata={"help": "the path to load the seller model for self-play negotiation."},
+    )
+
+    buyer_model_name_or_path: str = field(
+        default="",
+        metadata={"help": "the path to load the buyer model for self-play negotiation."},
+    )
+
     # data params
     taboo_max_turns: int = field(
         default=5, metadata={"help": "the max_turn to play the adversarial taboo game."}
