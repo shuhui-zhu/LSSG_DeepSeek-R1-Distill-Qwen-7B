@@ -106,9 +106,7 @@ def train():
         model_max_length=args.max_length,
         padding_side=args.padding_side,
         truncation_side=args.truncation_side,
-        use_fast=True,
         trust_remote_code=True,
-        use_cache=False,
     )
 
     model, tokenizer = set_special_tokens(model, tokenizer)
@@ -118,7 +116,7 @@ def train():
     if args.train_method == "SFT":
         trainer = Trainer(
             model=model,
-            tokenizer=tokenizer,
+            processing_class=tokenizer,
             args=args,
             train_dataset=train_dataset,
             data_collator=lambda x: sft_data_collactor(args, x, tokenizer),
@@ -127,7 +125,7 @@ def train():
     elif args.train_method == "SFTwithKL":
         trainer = SFTWeightedWithKLTrainer(
             model=model,
-            tokenizer=tokenizer,
+            processing_class=tokenizer,
             args=args,
             train_dataset=train_dataset,
             data_collator=lambda x: offline_ppo_data_collactor(args, x, tokenizer),
@@ -137,7 +135,7 @@ def train():
         trainer = OfflineWeightedPolicyTrainer(sentiment_classifier=sentiment_classifier,
             semantic_model=semantic_model,
             model=model,
-            tokenizer=tokenizer,
+            processing_class=tokenizer,
             args=args,
             train_dataset=train_dataset,
             data_collator=lambda x: offline_ppo_data_collactor(args, x, tokenizer)

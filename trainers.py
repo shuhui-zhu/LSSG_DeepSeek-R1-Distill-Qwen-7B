@@ -62,6 +62,10 @@ class SFTWeightedWithKLTrainer(Trainer):
         )
 
         with torch.no_grad():
+            # 冻结的 ref_model 不需要梯度检查点，开着会在 no_grad 前向时
+            # 触发 "None of the inputs have requires_grad=True" 警告
+            if getattr(model.ref_model, "is_gradient_checkpointing", False):
+                model.ref_model.gradient_checkpointing_disable()
             ref_model_outputs = model.ref_model(
                 input_ids=inputs["input_ids"], attention_mask=inputs["attention_mask"]
             )
@@ -150,6 +154,39 @@ class OfflineWeightedPolicyTrainer(Trainer):
         print(f"✅ [DeepSpeed] Manual parameter prefetch complete (recursive). Total: {num_params}, Failed: {failed}")
         return base_model
 
+    def build_generation_batch(self, inputs, max_input_len):
+        # 训练 batch 是 right-padding 的 [prompt + target + eos + pad]，直接喂给
+        # decoder-only 的 generate 会从答案和 pad 后面继续生成，得到的是垃圾文本。
+        # labels 开头连续的 IGNORE_INDEX 正好标出 prompt（[bos]+query）的长度，
+        # 这里把 prompt 单独取出并做 left-padding 供 generate 使用。
+        pad_id = self.processing_class.pad_token_id
+        if pad_id is None:
+            pad_id = self.processing_class.eos_token_id
+
+        prompt_ids_list = []
+        for row_ids, row_labels, row_mask in zip(
+            inputs["input_ids"], inputs["labels"], inputs["attention_mask"]
+        ):
+            real_len = max(int(row_mask.sum().item()), 1)
+            non_ignore = (row_labels[:real_len] != IGNORE_INDEX).nonzero(as_tuple=True)[0]
+            prompt_len = int(non_ignore[0].item()) if non_ignore.numel() > 0 else real_len
+            prompt_ids_list.append(row_ids[: max(prompt_len, 1)])
+
+        batch_size = len(prompt_ids_list)
+        gen_len = min(max(p.shape[0] for p in prompt_ids_list), max_input_len)
+        device = inputs["input_ids"].device
+        gen_input_ids = torch.full(
+            (batch_size, gen_len), pad_id, dtype=torch.long, device=device
+        )
+        gen_attention_mask = torch.zeros(
+            (batch_size, gen_len), dtype=torch.long, device=device
+        )
+        for i, prompt in enumerate(prompt_ids_list):
+            prompt = prompt[-gen_len:]
+            gen_input_ids[i, gen_len - prompt.shape[0]:] = prompt
+            gen_attention_mask[i, gen_len - prompt.shape[0]:] = 1
+        return gen_input_ids, gen_attention_mask
+
     def encode_texts(self, texts: List[str], fallback_shape: Tuple[int, int], device):
         try:
             cleaned = [t.strip() for t in texts if isinstance(t, str) and t.strip()]
@@ -175,6 +212,9 @@ class OfflineWeightedPolicyTrainer(Trainer):
         )
 
         with torch.no_grad():
+            # 同上：冻结的 ref_model 关闭梯度检查点
+            if getattr(model.ref_model, "is_gradient_checkpointing", False):
+                model.ref_model.gradient_checkpointing_disable()
             ref_model_outputs = model.ref_model(
                 input_ids=inputs["input_ids"], attention_mask=inputs["attention_mask"]
             )
@@ -198,32 +238,41 @@ class OfflineWeightedPolicyTrainer(Trainer):
         # 使用新方法统一处理
         model = self.unwrap_and_sync_model(model)
         max_input_len = model.config.max_position_embeddings - 64  # 放在解包之后再访问！
-        #  确保 generate 前所有参数已拉入内存
-        with torch.no_grad():
-            _ = model(input_ids=inputs["input_ids"][:, -max_input_len:],
-                      attention_mask=inputs["attention_mask"][:, -max_input_len:])
-            torch.cuda.synchronize()
+
+        # 只用 prompt 部分生成（left-padding），而不是整条 right-padding 的训练序列
+        gen_input_ids, gen_attention_mask = self.build_generation_batch(
+            inputs, max_input_len
+        )
 
         was_training = model.training
         model.gradient_checkpointing_disable()
         model.config.use_cache = True
+
+        #  确保 generate 前所有参数已拉入内存（放在关闭梯度检查点之后，
+        #  否则 no_grad 前向会触发 requires_grad 警告）
+        with torch.no_grad():
+            _ = model(input_ids=gen_input_ids, attention_mask=gen_attention_mask)
+            torch.cuda.synchronize()
         # 这里生成 generated_texts 文本并 decode 出来
         with torch.no_grad():
             generated_ids = model.generate(
-                input_ids=inputs["input_ids"][:, -max_input_len:],
-                attention_mask = inputs["attention_mask"][:, -max_input_len:],
-                # input_ids=inputs["input_ids"],
-                # attention_mask=inputs["attention_mask"],
+                input_ids=gen_input_ids,
+                attention_mask=gen_attention_mask,
                 max_new_tokens=64,
                 do_sample=True,
                 top_k=50,
                 repetition_penalty=1.2,
-                temperature=0.95
+                temperature=0.95,
+                pad_token_id=self.processing_class.pad_token_id,
             )
         if was_training:
             model.train()
         model.gradient_checkpointing_enable()
-        generated_texts = self.tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
+        model.config.use_cache = False
+        # 只 decode 新生成的 token（不含 prompt），与 reference_texts 可比
+        generated_texts = self.processing_class.batch_decode(
+            generated_ids[:, gen_input_ids.shape[1]:], skip_special_tokens=True
+        )
         print("generated_texts =", generated_texts)
 
 
@@ -257,11 +306,14 @@ class OfflineWeightedPolicyTrainer(Trainer):
 
         #  自定义文本：还需要 inputs["ref_texts"] → 用 label decode 得到
         labels = inputs["labels"].clone()
-        labels[labels == -100] = self.tokenizer.pad_token_id or 0
-        reference_texts = self.tokenizer.batch_decode(labels, skip_special_tokens=True)
+        labels[labels == -100] = self.processing_class.pad_token_id or 0
+        reference_texts = self.processing_class.batch_decode(labels, skip_special_tokens=True)
 
-        # 清洗 valid_texts
-        valid_texts = [t.strip() for t in generated_texts if isinstance(t, str) and t.strip()]
+        # 空串用占位符代替而不是过滤掉，保持与 reference/weights 的样本对齐
+        valid_texts = [
+            t.strip() if isinstance(t, str) and t.strip() else "..."
+            for t in generated_texts
+        ]
         dim = self.semantic_model.get_sentence_embedding_dimension()
         min_len = min(len(valid_texts), len(reference_texts))
 
@@ -281,8 +333,8 @@ class OfflineWeightedPolicyTrainer(Trainer):
         semantic_diversity_reward = 1 - cos_sim  # 越大越不同
         semantic_penalty = - self.args.semantic_coeff * semantic_diversity_reward.to(logprob.device)
 
-        # 情绪鲁棒性：情绪平衡损失项
-        sentiments = self.sentiment_classifier(generated_texts, truncation=True, max_length=512)
+        # 情绪鲁棒性：情绪平衡损失项（与 semantic 用同一份对齐后的文本）
+        sentiments = self.sentiment_classifier(valid_texts[:min_len], truncation=True, max_length=512)
 
         # 得到每句话的正面概率，例如：{'label': 'POSITIVE', 'score': 0.98}
         emotion_stability = torch.tensor(
